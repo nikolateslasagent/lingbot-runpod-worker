@@ -8,6 +8,10 @@ import sys
 import time
 import base64
 import tempfile
+
+# Add lingbot-world source to Python path BEFORE any imports
+sys.path.insert(0, "/app/lingbot-world")
+
 import runpod
 
 MODEL_REPO = "robbyant/lingbot-world-base-cam"
