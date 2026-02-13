@@ -110,9 +110,12 @@ def handler(job):
     # Parse size
     h, w = [int(x) for x in size.split("*")]
 
-    # Load reference image if provided
-    img = None
-    if image_b64:
+    # Load reference image (REQUIRED for image-to-video)
+    if not image_b64:
+        # Generate a simple gradient image as placeholder
+        img = Image.new("RGB", (w, h), (135, 206, 235))  # sky blue
+        print("[gen] No input image provided, using placeholder")
+    else:
         img_bytes = base64.b64decode(image_b64)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         img = img.resize((w, h))
