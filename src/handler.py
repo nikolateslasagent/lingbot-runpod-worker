@@ -1,5 +1,6 @@
 """
-RunPod Serverless handler for LingBot World (Wan2.2 I2V-A14B).
+RunPod Serverless handler for LingBot World (Wan2.2 Image-to-Video).
+Downloads model on first cold start, then caches.
 """
 
 import os
@@ -9,15 +10,16 @@ import base64
 import tempfile
 import shutil
 
-# Add lingbot-world source to Python path
+# Add lingbot-world source to Python path BEFORE any imports
 sys.path.insert(0, "/app/lingbot-world")
 
 import runpod
 
 MODEL_REPO = "robbyant/lingbot-world-base-cam"
+# Use /runpod-volume if available (persistent), else container disk
 _vol = "/runpod-volume" if os.path.isdir("/runpod-volume") else "/tmp"
 MODEL_DIR = os.environ.get("MODEL_DIR", f"{_vol}/model")
-DEVICE = 0  # GPU device id
+DEVICE = 0  # GPU device ID
 
 # Global model reference
 wan_i2v = None
@@ -25,6 +27,7 @@ wan_i2v = None
 
 def download_model():
     """Download model from HuggingFace if not already cached."""
+    # Log disk space
     for path in ["/", "/tmp", "/runpod-volume"]:
         try:
             usage = shutil.disk_usage(path)
@@ -41,6 +44,7 @@ def download_model():
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     os.environ["HF_HOME"] = os.path.join(os.path.dirname(MODEL_DIR), ".hf_cache")
+    os.environ["TRANSFORMERS_CACHE"] = os.environ["HF_HOME"]
 
     from huggingface_hub import snapshot_download
     snapshot_download(
@@ -55,7 +59,7 @@ def download_model():
 
 
 def load_model():
-    """Load the WanI2V model."""
+    """Load the WanI2V pipeline using the actual wan API."""
     global wan_i2v
 
     if wan_i2v is not None:
@@ -79,7 +83,8 @@ def load_model():
         t5_fsdp=False,
         dit_fsdp=False,
         use_sp=False,
-        t5_cpu=False,
+        t5_cpu=True,  # Offload T5 to CPU to save VRAM
+        convert_model_dtype=True,
     )
 
     print(f"[init] Model loaded in {time.time() - t0:.1f}s")
@@ -96,25 +101,30 @@ def handler(job):
     frame_num = int(inp.get("frame_num", 81))
     seed = int(inp.get("seed", 42))
 
+    import torch
     from PIL import Image
+    import io
     from wan.configs import MAX_AREA_CONFIGS
     from wan.utils.utils import save_video
-    import io
+
+    # Parse size
+    h, w = [int(x) for x in size.split("*")]
 
     # Load reference image if provided
     img = None
     if image_b64:
         img_bytes = base64.b64decode(image_b64)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        img = img.resize((w, h))
 
-    print(f"[gen] prompt={prompt[:80]}... size={size} frames={frame_num} seed={seed} img={'yes' if img else 'no'}")
+    print(f"[gen] prompt={prompt[:80]}... size={w}x{h} frames={frame_num} seed={seed}")
     t0 = time.time()
 
-    # Generate video
+    # Generate video using the actual wan API
     video = wan_i2v.generate(
         prompt,
         img,
-        max_area=MAX_AREA_CONFIGS[size],
+        max_area=MAX_AREA_CONFIGS.get(size, h * w),
         frame_num=frame_num,
         shift=5.0,
         sample_solver="unipc",
@@ -127,11 +137,11 @@ def handler(job):
     duration = time.time() - t0
     print(f"[gen] Generated in {duration:.1f}s")
 
-    # Save to MP4
+    # Save to temp MP4
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
         tmp_path = f.name
 
-    save_video(video, tmp_path, fps=16)
+    save_video(video, tmp_path, fps=16, quality=8)
 
     with open(tmp_path, "rb") as f:
         video_b64 = base64.b64encode(f.read()).decode()
@@ -142,8 +152,9 @@ def handler(job):
         "video_base64": video_b64,
         "duration_seconds": round(duration, 1),
         "frames": frame_num,
-        "size": size,
+        "size": f"{w}x{h}",
     }
 
 
+# Start the serverless worker
 runpod.serverless.start({"handler": handler})
