@@ -1,6 +1,6 @@
 """
 RunPod Serverless handler for LingBot World (Wan2.2 Image-to-Video).
-Downloads model on first cold start, then caches in /runpod-volume.
+Downloads model on first cold start, then caches.
 """
 
 import os
@@ -8,27 +8,24 @@ import sys
 import time
 import base64
 import tempfile
+import shutil
 
-# Add lingbot-world source to Python path BEFORE any imports
+# Add lingbot-world source to Python path
 sys.path.insert(0, "/app/lingbot-world")
 
 import runpod
 
 MODEL_REPO = "robbyant/lingbot-world-base-cam"
-# Use /runpod-volume if available (persistent), else /tmp (container disk)
 _vol = "/runpod-volume" if os.path.isdir("/runpod-volume") else "/tmp"
 MODEL_DIR = os.environ.get("MODEL_DIR", f"{_vol}/model")
-DEVICE = "cuda"
+DEVICE = 0  # GPU device id
 
-# Global model references (loaded once)
-pipe = None
+# Global model reference
+wan_i2v = None
 
 
 def download_model():
     """Download model from HuggingFace if not already cached."""
-    import shutil
-    
-    # Log disk space
     for path in ["/", "/tmp", "/runpod-volume"]:
         try:
             usage = shutil.disk_usage(path)
@@ -44,9 +41,7 @@ def download_model():
     print(f"[init] Downloading model {MODEL_REPO} to {MODEL_DIR}...")
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    # Set HF cache to same disk to avoid double storage
     os.environ["HF_HOME"] = os.path.join(os.path.dirname(MODEL_DIR), ".hf_cache")
-    os.environ["TRANSFORMERS_CACHE"] = os.environ["HF_HOME"]
 
     from huggingface_hub import snapshot_download
     snapshot_download(
@@ -55,17 +50,16 @@ def download_model():
         local_dir_use_symlinks=False,
     )
 
-    # Mark as complete
     with open(marker, "w") as f:
         f.write("ok")
     print("[init] Model download complete.")
 
 
 def load_model():
-    """Load the Wan2.2 pipeline."""
-    global pipe
+    """Load the Wan2.2 I2V model."""
+    global wan_i2v
 
-    if pipe is not None:
+    if wan_i2v is not None:
         return
 
     download_model()
@@ -73,21 +67,20 @@ def load_model():
     print("[init] Loading model into GPU...")
     t0 = time.time()
 
-    # Add lingbot-world source to path
-    sys.path.insert(0, "/app/lingbot-world")
-
-    import torch
+    import wan
     from wan.configs import WAN_CONFIGS
-    from wan.pipelines.pipeline_wan_i2v import WanI2VPipeline
 
-    cfg = WAN_CONFIGS["i2v-14B"]
+    cfg = WAN_CONFIGS["i2v-A14B"]
 
-    pipe = WanI2VPipeline.from_pretrained(
-        MODEL_DIR,
+    wan_i2v = wan.WanI2V(
         config=cfg,
-        device=DEVICE,
-        torch_dtype=torch.float16,
-        offload_model=True,  # CPU offload to fit in 48GB
+        checkpoint_dir=MODEL_DIR,
+        device_id=DEVICE,
+        rank=0,
+        t5_fsdp=False,
+        dit_fsdp=False,
+        use_sp=False,
+        t5_cpu=True,  # offload T5 to CPU to save VRAM
     )
 
     print(f"[init] Model loaded in {time.time() - t0:.1f}s")
@@ -107,61 +100,44 @@ def handler(job):
     import torch
     from PIL import Image
     import io
-    import imageio
+    from wan.configs import MAX_AREA_CONFIGS, WAN_CONFIGS
+    from wan.utils.utils import save_video
+
+    cfg = WAN_CONFIGS["i2v-A14B"]
 
     # Parse size
     h, w = [int(x) for x in size.split("*")]
 
     # Load reference image if provided
-    ref_image = None
+    img = None
     if image_b64:
         img_bytes = base64.b64decode(image_b64)
-        ref_image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        ref_image = ref_image.resize((w, h))
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        img = img.resize((w, h))
 
     print(f"[gen] prompt={prompt[:80]}... size={w}x{h} frames={frame_num} seed={seed}")
     t0 = time.time()
 
-    # Generate
-    generator = torch.Generator(device=DEVICE).manual_seed(seed)
-
-    if ref_image is not None:
-        video_frames = pipe(
-            prompt=prompt,
-            image=ref_image,
-            num_frames=frame_num,
-            height=h,
-            width=w,
-            generator=generator,
-        )
-    else:
-        video_frames = pipe(
-            prompt=prompt,
-            num_frames=frame_num,
-            height=h,
-            width=w,
-            generator=generator,
-        )
+    # Generate video
+    video = wan_i2v.generate(
+        prompt,
+        img,
+        max_area=MAX_AREA_CONFIGS[size],
+        frame_num=frame_num,
+        shift=cfg.sample_shift,
+        sample_solver="unipc",
+        sampling_steps=cfg.sample_steps,
+        guide_scale=cfg.sample_guide_scale,
+        seed=seed,
+        offload_model=True,
+    )
 
     duration = time.time() - t0
-    print(f"[gen] Generated {len(video_frames)} frames in {duration:.1f}s")
+    print(f"[gen] Generated in {duration:.1f}s")
 
-    # Encode to MP4
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-        tmp_path = f.name
-
-    # video_frames is a list of PIL Images or numpy arrays
-    import numpy as np
-    frames_np = []
-    for frame in video_frames:
-        if hasattr(frame, "numpy"):
-            frames_np.append(frame.numpy())
-        elif hasattr(frame, "convert"):
-            frames_np.append(np.array(frame))
-        else:
-            frames_np.append(np.array(frame))
-
-    imageio.mimwrite(tmp_path, frames_np, fps=16, quality=8)
+    # Save to temp MP4
+    tmp_path = tempfile.mktemp(suffix=".mp4")
+    save_video(video, tmp_path, fps=16, quality=8)
 
     with open(tmp_path, "rb") as f:
         video_b64 = base64.b64encode(f.read()).decode()
@@ -171,10 +147,9 @@ def handler(job):
     return {
         "video_base64": video_b64,
         "duration_seconds": round(duration, 1),
-        "frames": len(video_frames),
+        "frames": frame_num,
         "size": f"{w}x{h}",
     }
 
 
-# Start the serverless worker
 runpod.serverless.start({"handler": handler})
