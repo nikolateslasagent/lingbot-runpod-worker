@@ -1,6 +1,5 @@
 """
-RunPod Serverless handler for LingBot World (Wan2.2 Image-to-Video).
-Downloads model on first cold start, then caches.
+RunPod Serverless handler for LingBot World (Wan2.2 I2V-A14B).
 """
 
 import os
@@ -56,7 +55,7 @@ def download_model():
 
 
 def load_model():
-    """Load the Wan2.2 I2V model."""
+    """Load the WanI2V model."""
     global wan_i2v
 
     if wan_i2v is not None:
@@ -64,7 +63,7 @@ def load_model():
 
     download_model()
 
-    print("[init] Loading model into GPU...")
+    print("[init] Loading WanI2V model...")
     t0 = time.time()
 
     import wan
@@ -80,7 +79,7 @@ def load_model():
         t5_fsdp=False,
         dit_fsdp=False,
         use_sp=False,
-        t5_cpu=True,  # offload T5 to CPU to save VRAM
+        t5_cpu=False,
     )
 
     print(f"[init] Model loaded in {time.time() - t0:.1f}s")
@@ -97,25 +96,18 @@ def handler(job):
     frame_num = int(inp.get("frame_num", 81))
     seed = int(inp.get("seed", 42))
 
-    import torch
     from PIL import Image
-    import io
-    from wan.configs import MAX_AREA_CONFIGS, WAN_CONFIGS
+    from wan.configs import MAX_AREA_CONFIGS
     from wan.utils.utils import save_video
-
-    cfg = WAN_CONFIGS["i2v-A14B"]
-
-    # Parse size
-    h, w = [int(x) for x in size.split("*")]
+    import io
 
     # Load reference image if provided
     img = None
     if image_b64:
         img_bytes = base64.b64decode(image_b64)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        img = img.resize((w, h))
 
-    print(f"[gen] prompt={prompt[:80]}... size={w}x{h} frames={frame_num} seed={seed}")
+    print(f"[gen] prompt={prompt[:80]}... size={size} frames={frame_num} seed={seed} img={'yes' if img else 'no'}")
     t0 = time.time()
 
     # Generate video
@@ -124,10 +116,10 @@ def handler(job):
         img,
         max_area=MAX_AREA_CONFIGS[size],
         frame_num=frame_num,
-        shift=cfg.sample_shift,
+        shift=5.0,
         sample_solver="unipc",
-        sampling_steps=cfg.sample_steps,
-        guide_scale=cfg.sample_guide_scale,
+        sampling_steps=40,
+        guide_scale=5.0,
         seed=seed,
         offload_model=True,
     )
@@ -135,9 +127,11 @@ def handler(job):
     duration = time.time() - t0
     print(f"[gen] Generated in {duration:.1f}s")
 
-    # Save to temp MP4
-    tmp_path = tempfile.mktemp(suffix=".mp4")
-    save_video(video, tmp_path, fps=16, quality=8)
+    # Save to MP4
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        tmp_path = f.name
+
+    save_video(video, tmp_path, fps=16)
 
     with open(tmp_path, "rb") as f:
         video_b64 = base64.b64encode(f.read()).decode()
@@ -148,7 +142,7 @@ def handler(job):
         "video_base64": video_b64,
         "duration_seconds": round(duration, 1),
         "frames": frame_num,
-        "size": f"{w}x{h}",
+        "size": size,
     }
 
 
