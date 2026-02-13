@@ -83,7 +83,7 @@ def load_model():
         t5_fsdp=False,
         dit_fsdp=False,
         use_sp=False,
-        t5_cpu=True,  # Offload T5 to CPU to save VRAM
+        t5_cpu=False,  # A100 80GB has enough VRAM
         convert_model_dtype=True,
     )
 
@@ -131,7 +131,7 @@ def handler(job):
         sampling_steps=40,
         guide_scale=5.0,
         seed=seed,
-        offload_model=True,
+        offload_model=False,
     )
 
     duration = time.time() - t0
