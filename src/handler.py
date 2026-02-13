@@ -11,7 +11,9 @@ import tempfile
 import runpod
 
 MODEL_REPO = "robbyant/lingbot-world-base-cam"
-MODEL_DIR = os.environ.get("MODEL_DIR", "/runpod-volume/model")
+# Use /runpod-volume if available (persistent), else /tmp (container disk)
+_vol = "/runpod-volume" if os.path.isdir("/runpod-volume") else "/tmp"
+MODEL_DIR = os.environ.get("MODEL_DIR", f"{_vol}/model")
 DEVICE = "cuda"
 
 # Global model references (loaded once)
@@ -20,6 +22,16 @@ pipe = None
 
 def download_model():
     """Download model from HuggingFace if not already cached."""
+    import shutil
+    
+    # Log disk space
+    for path in ["/", "/tmp", "/runpod-volume"]:
+        try:
+            usage = shutil.disk_usage(path)
+            print(f"[disk] {path}: {usage.free/1024**3:.1f}GB free / {usage.total/1024**3:.1f}GB total")
+        except Exception:
+            pass
+
     marker = os.path.join(MODEL_DIR, ".download_complete")
     if os.path.exists(marker):
         print(f"[init] Model already cached at {MODEL_DIR}")
@@ -27,6 +39,10 @@ def download_model():
 
     print(f"[init] Downloading model {MODEL_REPO} to {MODEL_DIR}...")
     os.makedirs(MODEL_DIR, exist_ok=True)
+
+    # Set HF cache to same disk to avoid double storage
+    os.environ["HF_HOME"] = os.path.join(os.path.dirname(MODEL_DIR), ".hf_cache")
+    os.environ["TRANSFORMERS_CACHE"] = os.environ["HF_HOME"]
 
     from huggingface_hub import snapshot_download
     snapshot_download(
