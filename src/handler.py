@@ -98,7 +98,7 @@ def handler(job):
     prompt = inp.get("prompt", "A beautiful landscape")
     image_b64 = inp.get("image_base64")
     size = inp.get("size", "480*832")
-    frame_num = int(inp.get("frame_num", 81))
+    frame_num = int(inp.get("frame_num", 33))  # Default 33 frames (~2s video) for speed
     seed = int(inp.get("seed", 42))
 
     import torch
