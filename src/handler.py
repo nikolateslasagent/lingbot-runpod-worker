@@ -144,7 +144,7 @@ def handler(job):
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
         tmp_path = f.name
 
-    save_video(video, tmp_path, fps=16, quality=8)
+    save_video(video, tmp_path, fps=16)
 
     with open(tmp_path, "rb") as f:
         video_b64 = base64.b64encode(f.read()).decode()
