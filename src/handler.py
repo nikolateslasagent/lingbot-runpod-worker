@@ -131,7 +131,7 @@ def handler(job):
         frame_num=frame_num,
         shift=5.0,
         sample_solver="unipc",
-        sampling_steps=40,
+        sampling_steps=20,
         guide_scale=5.0,
         seed=seed,
         offload_model=False,
